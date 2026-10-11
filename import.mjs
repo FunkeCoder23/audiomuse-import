@@ -1,24 +1,24 @@
 #!/usr/bin/env node
 // Import pre-computed analysis from an AudioMuse-AI instance into SUB/WAVE's
 // library.db, skipping the slow LLM tagging + BPM/key pass. Standalone: talks
-// only to AudioMuse (GET /api/sync) and state/library.db. AudioMuse keys by the
-// media-server track id, which IS tracks.id, so the join needs no Navidrome auth.
+// only to AudioMuse (GET /api/sync) and SUB/WAVE's state/library.db. AudioMuse
+// keys by the media-server track id, which IS tracks.id, so the join needs no
+// Navidrome auth.
 //
 // Imports:  tempo -> bpm, key+scale -> Camelot musical_key, energy ->
 //           low/medium/high, mood_vector/other_features -> moods, top genre tag.
-// Skips:    CLAP/MusiCNN embeddings, and leaves analysis_version NULL so a later
-//           `npm run analyze` still adds outro/structure/embeddings.
+// Skips:    CLAP/MusiCNN embeddings, and leaves analysis_version NULL so
+//           SUB/WAVE's acoustic analysis still adds outro/structure/embeddings.
 
 import Database from 'better-sqlite3';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { mapTrack } from './map.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
 // Column-set version this tool writes against; matches TAGGER_VERSION in
-// controller/src/music/library-db.ts, so imported moods count as current tags.
+// SUB/WAVE's controller/src/music/library-db/handle.ts
+// (https://github.com/perminder-klair/subwave), so imported moods count as
+// current tags. The schema itself is owned there; this tool never migrates.
 // MIN_USER_VERSION is the earliest schema carrying every column written here
 // (v16 moved genre storage to the `genres` JSON array and made `genre` a
 // GENERATED column, which rejects writes); below it, refuse and tell the user
@@ -37,7 +37,8 @@ function parseArgs(argv) {
     else if (a === '--limit') args.limit = Number(next()) || undefined;
     else if (a === '--mood-cutoff') {
       // Guard NaN/out-of-range: an unparseable value would silently disable
-      // mood filtering, since `score < NaN` is always false (#934).
+      // mood filtering, since `score < NaN` is always false
+      // (perminder-klair/subwave#934).
       const mc = Number(next());
       args.moodCutoff = Number.isFinite(mc) ? Math.min(1, Math.max(0, mc)) : 0.4;
     }
@@ -55,19 +56,23 @@ function parseArgs(argv) {
 const HELP = `audiomuse-import — import AudioMuse-AI analysis into SUB/WAVE's library.db
 
 Usage:
-  AUDIOMUSE_URL=http://audiomuse:8000 node import.mjs [options]
+  audiomuse-import --audiomuse-url http://audiomuse:8000 \\
+    --library-db /path/to/subwave/state/library.db [options]
 
 Options:
   --audiomuse-url <url>   AudioMuse base URL (or AUDIOMUSE_URL env). Required.
-  --library-db <path>     Path to library.db (default: <STATE_DIR>/library.db
-                          or ../../state/library.db).
+  --library-db <path>     Path to SUB/WAVE's library.db (default:
+                          $STATE_DIR/library.db, else ./state/library.db).
   --overwrite             Overwrite existing bpm/moods/key/energy (default:
                           fill only empty fields, never clobber SUB/WAVE's own).
-  --dry-run               Map and report, write nothing.
+  --dry-run               Map and report (incl. how many tracks would update
+                          vs be added), write nothing.
   --concurrency <n>       Reserved; paging is currently sequential.
   --mood-cutoff <0..1>    Min tag score to count a mood (default 0.4).
   --limit <n>             Stop after N AudioMuse tracks (testing).
   -h, --help              This help.
+
+Docs: https://github.com/getsubwave/audiomuse-import
 `;
 
 async function* iterateAudioMuseTracks(baseUrl, { limit } = {}) {
@@ -180,7 +185,7 @@ function makeWriter(db) {
       params.now = now;
       // Energy rides with the mood write, but only when AudioMuse gave one: the
       // existence SELECT doesn't read energy, so a null here would clobber an
-      // energy SUB/WAVE already computed (#934).
+      // energy SUB/WAVE already computed (perminder-klair/subwave#934).
       if (mapped.energy != null) {
         sets.push('energy = @energy');
         params.energy = mapped.energy;
@@ -213,12 +218,13 @@ async function main() {
     process.exit(1);
   }
 
-  const stateDir = process.env.STATE_DIR || resolve(__dirname, '../../state');
+  const stateDir = process.env.STATE_DIR || resolve(process.cwd(), 'state');
   const dbPath = args.libraryDb || resolve(stateDir, 'library.db');
   if (!existsSync(dbPath)) {
     console.error(
-      `library.db not found at ${dbPath}. Start the SUB/WAVE controller once ` +
-        `(or run \`npm run analyze\`) to create it, or pass --library-db.`,
+      `library.db not found at ${dbPath}. Pass --library-db with the path to ` +
+        `library.db inside your SUB/WAVE state/ folder. It is created the first ` +
+        `time the station starts.`,
     );
     process.exit(1);
   }
@@ -229,7 +235,7 @@ async function main() {
   if (userVersion < MIN_USER_VERSION) {
     console.error(
       `library.db schema is v${userVersion}, need >= v${MIN_USER_VERSION}. ` +
-        `Boot the SUB/WAVE controller once to run migrations, then re-run.`,
+        `Update SUB/WAVE and start it once so it upgrades the database, then re-run.`,
     );
     db.close();
     process.exit(1);
@@ -242,6 +248,7 @@ async function main() {
   console.log('');
 
   const writeTrack = makeWriter(db);
+  const existsStmt = db.prepare('SELECT 1 FROM tracks WHERE id = ?');
   const counts = { seen: 0, inserted: 0, updated: 0, skipped: 0, noSignal: 0 };
   const samples = [];
 
@@ -256,7 +263,14 @@ async function main() {
       if (samples.length < 5) {
         samples.push({ title: t.title, artist: t.author, ...mapped });
       }
-      if (args.dryRun) continue;
+      if (args.dryRun) {
+        // The one thing a dry run can't otherwise show: whether AudioMuse's ids
+        // line up with this library. Mostly "added" on an established station
+        // means they don't.
+        if (existsStmt.get(t.id)) counts.updated++;
+        else counts.inserted++;
+        continue;
+      }
       const outcome = writeTrack(t.id, { title: t.title, artist: t.author, album: t.album, year: t.year }, mapped, { overwrite: args.overwrite });
       if (outcome === 'inserted' || outcome === 'inserted-empty') counts.inserted++;
       else if (outcome === 'updated') counts.updated++;
@@ -292,6 +306,8 @@ async function main() {
   console.log(`AudioMuse tracks read:  ${counts.seen}`);
   console.log(`  no usable signal:     ${counts.noSignal}`);
   if (args.dryRun) {
+    console.log(`  would update existing: ${counts.updated}`);
+    console.log(`  would add as new:      ${counts.inserted}`);
     console.log('(dry run — nothing written)');
   } else {
     console.log(`  rows inserted:        ${counts.inserted}`);
@@ -299,10 +315,14 @@ async function main() {
     console.log(`  left untouched:       ${counts.skipped}`);
   }
   console.log('');
+  if (args.dryRun) {
+    console.log('Run again without --dry-run to import.');
+    return;
+  }
   console.log(
-    'Done. This imported moods/bpm/key only — embeddings and ending-aware\n' +
-      'transition data are NOT included. Run `npm run analyze` in the controller\n' +
-      '(heavy tier for sonic search) to add outro/structure/CLAP embeddings.',
+    'Done. This imported moods/bpm/key/energy/genre only — embeddings and\n' +
+      'ending-aware transition data are NOT included. Next, in SUB/WAVE open\n' +
+      'Admin -> Library and run an acoustic analysis pass to add them.',
   );
 }
 

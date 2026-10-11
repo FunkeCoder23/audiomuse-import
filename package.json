@@ -1,20 +1,40 @@
 {
   "name": "audiomuse-import",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Import pre-computed track analysis (moods, bpm, key, energy) from an AudioMuse-AI instance into SUB/WAVE's library.db, so a Navidrome user who already tagged their library doesn't have to re-tag.",
+  "description": "Import pre-computed track analysis (moods, bpm, key, energy, genre) from an AudioMuse-AI instance into a SUB/WAVE station's library.db, so a Navidrome user who already tagged their library doesn't have to re-tag.",
+  "keywords": [
+    "subwave",
+    "audiomuse",
+    "navidrome",
+    "music-tagging",
+    "internet-radio"
+  ],
+  "homepage": "https://github.com/getsubwave/audiomuse-import#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getsubwave/audiomuse-import.git"
+  },
+  "bugs": {
+    "url": "https://github.com/getsubwave/audiomuse-import/issues"
+  },
+  "license": "MIT",
   "bin": {
     "audiomuse-import": "./import.mjs"
   },
+  "files": [
+    "import.mjs",
+    "map.mjs"
+  ],
   "scripts": {
     "start": "node import.mjs",
     "test": "node --test"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^12.11.1"
   }
 }

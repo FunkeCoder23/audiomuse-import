@@ -1,8 +1,9 @@
 // Pure mapping from AudioMuse-AI's analysis vocabulary into SUB/WAVE's
 // library.db columns. No I/O; every function is a pure transform (map.test.mjs).
 // The target shapes (Camelot musical_key, energy low/medium/high, the 17-mood
-// vocab, the JSON moods array) mirror controller/src/music/library-db.ts +
-// settings.ts and must be updated alongside them.
+// vocab, the JSON moods array) mirror SUB/WAVE's controller/src/music/library-db/
+// and controller/src/settings/vocab.ts (https://github.com/perminder-klair/subwave)
+// and must be updated alongside them.
 
 // AudioMuse stores mood_vector / other_features as "label:score,label:score"
 // with 3-decimal scores (database.py). Labels never contain a colon, so a
@@ -57,8 +58,9 @@ export function energyToBucket(energy) {
 
 // Static map from AudioMuse's tags (50 MusiCNN mood_vector + 6 CLAP
 // other_features labels) to SUB/WAVE's 17 editorial moods (SHOW_MOODS in
-// settings.ts). Keys are lower-cased. Pure genre/decade/instrument tags map to
-// nothing on purpose; the audio-mood pass and contextual moods cover those.
+// controller/src/settings/vocab.ts). Keys are lower-cased. Pure
+// genre/decade/instrument tags map to nothing on purpose; the audio-mood pass
+// and contextual moods cover those.
 export const AUDIOMUSE_MOOD_MAP = {
   // energetic
   aggressive: 'energetic', 'hard rock': 'energetic', 'heavy metal': 'energetic',
@@ -89,7 +91,8 @@ const GENRE_TAGS = new Set([
 
 // Highest-scoring genre-like tag from a parsed mood_vector, or null, in
 // AudioMuse's original casing. `cutoff` gates confidence like moods, so a
-// near-zero tag can't become a genre off noise (#934); default 0 = unfiltered.
+// near-zero tag can't become a genre off noise (perminder-klair/subwave#934);
+// default 0 = unfiltered.
 export function topGenre(moodScores, cutoff = 0) {
   let best = null;
   let bestScore = -Infinity;

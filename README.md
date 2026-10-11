@@ -1,120 +1,246 @@
 # audiomuse-import
 
-Import pre-computed track analysis from an [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI)
-instance into SUB/WAVE's `library.db`, so a user who already tagged their library
-in AudioMuse doesn't have to run SUB/WAVE's slow LLM tagging + BPM/key pass again.
+Copy the music analysis you already did in [AudioMuse-AI](https://github.com/NeptuneHub/AudioMuse-AI)
+into a [SUB/WAVE](https://github.com/perminder-klair/subwave) station, so the AI DJ
+knows your library without tagging it all over again.
 
-**Standalone** — imports nothing from the controller. It talks only to AudioMuse
-over HTTP and to `state/library.db` over SQLite. Only dependency is
-[`better-sqlite3`](https://www.npmjs.com/package/better-sqlite3).
+SUB/WAVE's DJ chooses music by mood, energy, tempo and key. On a fresh station it has
+to work those out for every track, which on a big library takes hours. If AudioMuse
+has already analysed the same music, this tool reads its results and writes them
+straight into SUB/WAVE's library database. It takes a couple of minutes.
 
-## Why this works (and its limits)
+- **Fills in moods, BPM, musical key, energy and genre** for every track AudioMuse knows.
+- **Leaves your existing SUB/WAVE tags alone** unless you ask it to overwrite them.
+- **Has a dry-run mode** that shows how many tracks match before anything is written.
+- **Works on a brand-new station** with an empty library, as well as an established one.
 
-Both systems key every track by the **media-server song id**. When AudioMuse and
-SUB/WAVE point at the **same Navidrome**, AudioMuse's `score.item_id` *is*
-SUB/WAVE's `tracks.id` (the Subsonic id) — so the join is exact and needs no
-Navidrome auth at all. The tool reads AudioMuse's whole library via
-`GET /api/sync` and writes matched rows straight into `library.db`.
+## Before you start
 
-**Navidrome only.** If AudioMuse was run against Jellyfin / Plex / Emby / LMS, its
-ids live in that server's namespace and won't match SUB/WAVE's Subsonic ids. The
-tool checks `provider_type` on the first page and refuses if it isn't `navidrome`.
+You need:
 
-### What transfers
+1. **A SUB/WAVE station that has started at least once.** The first boot creates
+   `library.db`, the database this tool writes into.
+2. **An AudioMuse-AI instance that has analysed your library**, reachable over HTTP
+   from wherever you run the tool (for example `http://192.168.1.20:8000`).
+3. **Both pointed at the same Navidrome server.** The tool matches tracks by
+   Navidrome's song id, so the match is exact, with no guessing by filename. If
+   AudioMuse is connected to Jellyfin, Plex, Emby or LMS instead, the ids won't line
+   up and the tool will refuse to run.
+4. **Docker** (the easy way) **or Node.js 20 or newer** on the machine that holds
+   your SUB/WAVE `state/` folder.
 
-| AudioMuse | → SUB/WAVE `tracks` column | Notes |
-| --- | --- | --- |
-| `tempo` | `bpm` | direct |
-| `key` + `scale` | `musical_key` | converted to Camelot (e.g. A minor → `8A`) |
-| `energy` | `energy` | bucketed to `low` / `medium` / `high` |
-| `mood_vector` + `other_features` | `moods` (JSON array) | static translation to SUB/WAVE's 17-mood vocab (see `map.mjs`); genre/decade tags don't produce moods |
-| top genre tag from `mood_vector` | `genres` (JSON array) | only fills an empty genre list; the scalar `genre` column is generated from it |
+### Find your SUB/WAVE `state/` folder
 
-### What does NOT transfer (still needs `npm run analyze`)
+Everything below needs the path to your station's `state/` folder, which holds
+`library.db`:
 
-- **CLAP / MusiCNN embeddings** — AudioMuse's are a different model + vector space
-  from SUB/WAVE's laion-clap, so they can't drive `searchBySound` or zero-shot
-  audio moods. Not imported.
-- **Ending/outro, structure, LUFS, beats/bars, vocal ranges** — AudioMuse doesn't
-  compute them; SUB/WAVE's transitions depend on them.
+| How you installed SUB/WAVE | Where `state/` usually is |
+| --- | --- |
+| `subwave` CLI | `~/subwave/state` |
+| `docker compose` from a clone | `state/`, next to `docker-compose.yml` |
+| Custom `STATE_DIR` in `.env` | whatever `STATE_DIR` is set to |
+| Unraid / all-in-one container | the host folder you mapped to `/var/sub-wave` |
 
-So this is a **bootstrap, not a full replacement**: it saves the expensive tagging
-+ BPM/key work, then you still run `npm run analyze` (heavy tier for sonic search)
-to add the transition/embedding data. The import deliberately leaves
-`analysis_version` NULL so `npm run analyze` still selects these tracks — and
-stamps `tagger_version` so `npm run tag` treats the imported moods as current and
-won't redo them.
+Check you have the right one: it should contain a file called `library.db`.
 
-## Setup
+## Run it with Docker (recommended)
 
-The tool is **not** shipped inside any SUB/WAVE container image — run it on the
-host (or any machine with Node ≥ 18) that can see your `state/` directory. With the
-default docker compose install that is the `state/` folder next to
-`docker-compose.yml` (or wherever `STATE_DIR` in `.env` points), which is
-bind-mounted into the controller at `/var/sub-wave`.
+This needs nothing installed except Docker, and it avoids file-permission problems,
+because SUB/WAVE's containers create `library.db` as root.
+
+**1. Preview.** Replace the two placeholders, then run:
 
 ```bash
-git clone https://github.com/perminder-klair/subwave.git subwave-src
-cd subwave-src/tools/audiomuse-import
+docker run --rm --network host \
+  -v /path/to/subwave/state:/state \
+  node:22 \
+  npx -y github:getsubwave/audiomuse-import \
+    --audiomuse-url http://localhost:8000 \
+    --library-db /state/library.db \
+    --dry-run
+```
+
+- `/path/to/subwave/state` is your `state/` folder from above.
+- `http://localhost:8000` is your AudioMuse address. `--network host` lets the
+  container reach services on the host as `localhost` (Linux). On macOS or Windows,
+  or if AudioMuse runs on another machine, use its LAN address instead, for
+  example `http://192.168.1.20:8000`.
+
+You'll see a few sample mappings, then how many tracks **would update** (already
+in your SUB/WAVE library) and how many **would be added** as new. On a station
+that has been running a while, nearly everything should be "would update". If
+it's mostly "would be added", stop and read
+[the last troubleshooting entry](#mostly-would-be-added). Nothing is written.
+
+**2. Import.** Run the same command without `--dry-run`.
+
+**3. Finish in SUB/WAVE.** See [After the import](#after-the-import).
+
+## Run it with Node.js
+
+If you'd rather not use Docker, any machine with Node.js 20+ that can see your
+`state/` folder will do.
+
+```bash
+git clone https://github.com/getsubwave/audiomuse-import.git
+cd audiomuse-import
 npm install
-AUDIOMUSE_URL=http://your-audiomuse:8000 node import.mjs \
-  --library-db /path/to/your/subwave/state/library.db
+
+# preview
+node import.mjs --audiomuse-url http://localhost:8000 \
+  --library-db /path/to/subwave/state/library.db --dry-run
+
+# import
+node import.mjs --audiomuse-url http://localhost:8000 \
+  --library-db /path/to/subwave/state/library.db
 ```
 
-The clone is only for the tool; it does not need to be the checkout your station
-runs from.
-
-## Usage
+Or skip the clone and run it straight from GitHub:
 
 ```bash
-AUDIOMUSE_URL=http://audiomuse:8000 node import.mjs [options]
+npx github:getsubwave/audiomuse-import \
+  --audiomuse-url http://localhost:8000 \
+  --library-db /path/to/subwave/state/library.db --dry-run
 ```
 
-| Flag | Default | Notes |
+If you get `attempt to write a readonly database`, `library.db` belongs to root
+(SUB/WAVE's containers created it). Use the Docker method above instead.
+
+## After the import
+
+Open SUB/WAVE's admin console and go to **Library**:
+
+- **Tagging coverage** should have jumped. Any tracks AudioMuse hadn't analysed are
+  still untagged; SUB/WAVE's own tagger picks those up as usual.
+- **Run an acoustic analysis pass** (the *Acoustic analysis* strip on the same page).
+  AudioMuse doesn't measure where a song's intro and ending fall, how loud it is, or
+  what it "sounds like" in SUB/WAVE's terms, and those drive smooth transitions and
+  sonic search. The import deliberately leaves those tracks marked as not yet
+  analysed, so the pass covers them.
+
+It's fine to import while the station is on air. SUB/WAVE shares the database
+safely, but it's tidier not to run the import during a big tagging or analysis
+pass.
+
+## What comes across
+
+| From AudioMuse | Into SUB/WAVE | How |
 | --- | --- | --- |
-| `--audiomuse-url <url>` | `$AUDIOMUSE_URL` | AudioMuse base URL. Required. |
-| `--library-db <path>` | `<STATE_DIR>/library.db` or `../../state/library.db` | Target DB. |
-| `--overwrite` | off | Overwrite existing `bpm`/`moods`/`key`/`energy`. Default fills only empty fields and never clobbers SUB/WAVE's own tags. |
-| `--dry-run` | off | Map and report, write nothing. |
-| `--concurrency <n>` | `8` | (Reserved; paging is currently sequential.) |
-| `--mood-cutoff <0..1>` | `0.4` | Min AudioMuse tag score to count a mood. |
-| `--limit <n>` | — | Stop after N tracks (testing). |
+| `tempo` | BPM | copied as is |
+| `key` + `scale` | musical key | converted to [Camelot notation](https://mixedinkey.com/camelot-wheel/) (A minor → `8A`) |
+| `energy` | energy | bucketed into `low` / `medium` / `high` |
+| mood and style tags | moods | translated into SUB/WAVE's mood vocabulary (`calm`, `energetic`, `reflective`, `celebratory`, `romantic`, `focus`). The full table is `AUDIOMUSE_MOOD_MAP` in [`map.mjs`](map.mjs) |
+| the strongest genre tag | genre | only fills a track with no genre yet |
 
-### Examples
+### What doesn't come across
 
-```bash
-# See what would happen, no writes
-AUDIOMUSE_URL=http://audiomuse:8000 node import.mjs --dry-run
+- **Audio embeddings.** AudioMuse's CLAP/MusiCNN vectors come from a different model
+  than SUB/WAVE's, so they can't power SUB/WAVE's "sounds like" search.
+- **Intro/ending timing, song structure, loudness, beat grid, vocal sections.**
+  AudioMuse doesn't measure these. SUB/WAVE's acoustic analysis does.
 
-# Import, filling only gaps (safe alongside SUB/WAVE's own analyzer/tagger)
-AUDIOMUSE_URL=http://audiomuse:8000 node import.mjs
+So the import replaces SUB/WAVE's slow **tagging** step, not its **acoustic
+analysis**. That's why the last step above matters.
 
-# Let AudioMuse's data win everywhere
-AUDIOMUSE_URL=http://audiomuse:8000 node import.mjs --overwrite
+## How it decides what to write
+
+- **Default: fill the gaps.** A track that already has BPM, key or moods in SUB/WAVE
+  keeps them. Only empty fields are filled.
+- **`--overwrite`:** AudioMuse's values replace SUB/WAVE's for BPM, key, moods and
+  energy. Genre is still only filled where empty.
+- **Tracks SUB/WAVE hasn't seen yet are added**, using AudioMuse's title, artist and
+  album. That's what makes it useful on a brand-new station.
+- **Imported moods count as hand-set tags.** SUB/WAVE treats them the way it treats
+  tags you set yourself: its tagger won't redo them, and that includes *Re-decide
+  moods*.
+- **Tracks with nothing usable** (no tempo, key or mood) are skipped and counted as
+  "no usable signal".
+
+## Options
+
+```
+node import.mjs [options]
 ```
 
-Run it while the station is idle — `library.db` is shared with the running
-controller; SQLite serialises the writes, but avoiding a heavy tagging/analysis
-pass at the same time is tidier.
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--audiomuse-url <url>` | `$AUDIOMUSE_URL` | Your AudioMuse address. Required. |
+| `--library-db <path>` | `$STATE_DIR/library.db`, else `./state/library.db` | The SUB/WAVE database to write into. |
+| `--dry-run` | off | Show what would happen; write nothing. |
+| `--overwrite` | off | Replace existing BPM, key, moods and energy instead of only filling gaps. |
+| `--mood-cutoff <0..1>` | `0.4` | How confident an AudioMuse tag must be to count as a mood or genre. Raise it for fewer, surer moods. |
+| `--limit <n>` | none | Stop after `n` AudioMuse tracks. Handy for a quick test. |
+| `-h`, `--help` | | Show help. |
 
-## Notes & safety
+You can set `AUDIOMUSE_URL` and `STATE_DIR` as environment variables instead of
+passing the first two options.
 
-- **Requires `library.db` schema ≥ v16** (the migration that moved genres to the
-  `genres` JSON array and made `genre` a generated column).
-  If lower, the tool refuses and asks you to boot the controller once to migrate.
-  It never runs migrations itself — `controller/src/music/library-db.ts` owns the
-  schema; this tool only writes columns it defines.
-- **Works on a fresh install.** Matched-but-absent tracks are `INSERT`ed from
-  AudioMuse's own title/artist/album, so an empty `library.db` gets populated —
-  which is the whole point for "I don't want to tag it all again".
-- Tracks AudioMuse has but SUB/WAVE's Navidrome doesn't (different `id`) simply
-  never match; the import counts and skips them.
+## Troubleshooting
 
-## Testing
+**`library.db not found`.** The path is wrong, or SUB/WAVE hasn't started yet.
+Check the folder contains `library.db`, then pass it with `--library-db`.
+
+**`library.db schema is vN, need >= v16`.** Your SUB/WAVE is older than this tool
+expects. Update SUB/WAVE, start it once so it upgrades its database, then run the
+import again.
+
+**`AudioMuse is configured for 'jellyfin', not navidrome`** (or plex, emby, lms).
+Track ids from those servers can't be matched to SUB/WAVE's. AudioMuse has to
+analyse the same Navidrome that SUB/WAVE plays from.
+
+**`...returned 200 but the body was not JSON`** or **`no "tracks" array`.** The URL
+isn't reaching AudioMuse's API. Usually it's a typo, the wrong port, or a login page
+in front of it. Opening `<your-url>/api/sync?page=1&limit=1` in a browser should
+return JSON.
+
+**`fetch failed` / `ECONNREFUSED`.** The tool can't reach AudioMuse at all. From
+inside Docker, `localhost` only means the host when you use `--network host`
+(Linux). Otherwise use the machine's LAN IP.
+
+**`attempt to write a readonly database`.** `library.db` is owned by root. Use the
+Docker method, or run Node as a user that can write to the `state/` folder.
+
+<a id="mostly-would-be-added"></a>
+**The dry run says most tracks "would be added", but the station already has its
+library.** AudioMuse's track ids don't match your Navidrome's current ones, so
+importing would add duplicate rows instead of tagging the tracks you have. The
+usual cause: Navidrome 0.64 changed most of its track ids, and AudioMuse analysed
+your library before that upgrade and hasn't rescanned since. Bring AudioMuse up to
+date with your Navidrome, check the dry run again, then import. (If you already
+imported, SUB/WAVE's library sync removes rows that aren't on your music server;
+a large removal waits for you to confirm it.)
+
+## How it works
+
+AudioMuse exposes its whole library over `GET /api/sync`, keyed by the media
+server's song id. SUB/WAVE keys its `tracks` table by the same Navidrome (Subsonic)
+song id. So when both point at one Navidrome, AudioMuse's id *is* SUB/WAVE's id and
+the join is exact, with no Navidrome login needed.
+
+The tool pages through `/api/sync` 500 tracks at a time, translates each track
+([`map.mjs`](map.mjs), pure functions), and writes them in batched SQLite
+transactions ([`import.mjs`](import.mjs)). It never changes SUB/WAVE's database
+schema. It refuses to run against a database older than it understands, and only
+writes columns SUB/WAVE already has. Its one dependency is
+[`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3).
+
+## Development
 
 ```bash
-node --test          # pure mapping tests (no db needed)
+npm install
+npm test
 ```
 
-`map.mjs` holds all the pure transforms (tag parsing, Camelot conversion, energy
-bucketing, the mood map); `map.test.mjs` pins them.
+`map.test.mjs` pins the pure mappings (tag parsing, Camelot conversion, energy
+buckets, the mood map). `import.test.mjs` runs the whole CLI against a fake
+AudioMuse server and a throwaway database shaped like SUB/WAVE's.
+
+This tool used to live in the SUB/WAVE repository under `tools/audiomuse-import`.
+Its history came with it.
+
+Issues and pull requests are welcome. If SUB/WAVE changes how it stores tags,
+`TAGGER_VERSION` and `MIN_USER_VERSION` at the top of `import.mjs` have to follow.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
